@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Facemash — 24h Sessions + Face-only Upload</title>
+<title>Facemash — Daily Face-off</title>
 <style>
   :root{--bg:#f5f6fa;--card:#fff;--accent:#0f172a;--muted:#6b7280;--radius:12px}
   *{box-sizing:border-box}
@@ -30,390 +30,181 @@
   .thumb img{width:100%;height:100%;object-fit:cover}
   .small{font-size:13px;color:var(--muted)}
   footer{margin-top:18px;text-align:center;font-size:13px;color:var(--muted)}
-  .notice{padding:10px;border-radius:8px;background:#fff3cd;color:#6a4d00;border:1px solid #ffe8a7}
 </style>
 </head>
 <body>
   <div class="wrap">
     <header>
-      <h1>Facemash-style Voting</h1>
-      <p class="lead">“Were we let in for our looks? No. Will we be judged on them? Yes.” — Voting & ranking persist for 24 hours.</p>
+      <h1>Facemash — Daily Face-off</h1>
+      <p class="lead">Two faces. One winner. Votes reset every 24 hours.</p>
     </header>
 
     <main class="grid">
       <section>
         <div class="card">
-          <h3 style="margin-top:0">Face-off — choose one</h3>
-          <div class="small muted">You may vote **once per device**. Votes & profiles persist for 24 hours from creation/reset.</div>
+          <h3 style="margin-top:0">Today’s Match</h3>
+          <div class="small muted">You can vote once per day. Winner is announced after 24 hours.</div>
           <div style="height:12px"></div>
 
           <div class="voting" id="votingArea">
             <div class="profile" id="leftCard"></div>
             <div class="profile" id="rightCard"></div>
           </div>
-
-          <div style="margin-top:12px;display:flex;gap:8px">
-            <button id="skipBtn" class="btn" style="background:#64748b">Skip</button>
-            <button id="resetBtn" class="btn" style="background:#ef4444">Reset (Admin)</button>
-            <div style="margin-left:auto" class="small muted">Profiles: <span id="count">0</span></div>
-          </div>
-        </div>
-
-        <div style="height:14px"></div>
-
-        <div class="card">
-          <h4 style="margin-top:0">Match History (last 8)</h4>
-          <div id="history" class="small muted">No matches yet.</div>
         </div>
       </section>
 
       <aside>
         <div class="card">
-          <h4 style="margin-top:0">Add Person (face-only)</h4>
-          <div class="small muted">Only images with **a detected face** will be accepted. If your browser doesn't support automatic face detection the uploader is disabled.</div>
-
-          <div style="height:10px"></div>
-
+          <h4 style="margin-top:0">Add Person</h4>
           <div id="uploaderArea" class="uploader">
             <input id="nameInput" placeholder="Name (optional)" />
             <input id="fileInput" type="file" accept="image/*" />
             <button id="addBtn" class="btn">Add Person</button>
-            <div id="uploaderNotice" class="muted small"></div>
           </div>
         </div>
 
         <div style="height:12px"></div>
 
         <div class="card">
-          <h4 style="margin-top:0">Hall of Fame — Top 5 (Elo)</h4>
+          <h4 style="margin-top:0">Current Score</h4>
           <div id="leaderboard" class="leaderboard-list"></div>
         </div>
       </aside>
     </main>
 
     <footer>
-      This demo stores everything in your browser for 24 hours only. Clearing browser data will delete it sooner.
+      Votes and results are saved only for 24 hours.
     </footer>
   </div>
 
 <script>
 (() => {
-  // keys & constants
-  const STORAGE_KEY = 'facemash_session_v2';
-  const VOTE_FLAG_KEY = 'facemash_voted_flag_v2';
-  const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-  const K = 32; // Elo K-factor
-  const MAX_HISTORY = 8;
+  const STORAGE_KEY = 'facemash_daily';
+  const VOTE_KEY = 'facemash_daily_vote';
+  const DAY_MS = 24*60*60*1000;
 
-  // DOM refs
   const leftCard = document.getElementById('leftCard');
   const rightCard = document.getElementById('rightCard');
   const leaderboardEl = document.getElementById('leaderboard');
-  const countEl = document.getElementById('count');
-  const historyEl = document.getElementById('history');
   const addBtn = document.getElementById('addBtn');
   const fileInput = document.getElementById('fileInput');
   const nameInput = document.getElementById('nameInput');
-  const skipBtn = document.getElementById('skipBtn');
-  const resetBtn = document.getElementById('resetBtn');
-  const uploaderNotice = document.getElementById('uploaderNotice');
 
-  // state
   let state = {
-    createdAt: Date.now(),
-    profiles: [], // { id, name, imgDataUrl, elo, wins, losses, votes }
-    history: []   // { leftId, rightId, winnerId, timestamp }
+    dayStart: Date.now(),
+    profiles: [],
+    match: null // {leftId, rightId}
   };
 
-  // face detection capability check
-  let faceDetectorAvailable = false;
-  if ('FaceDetector' in window) {
-    try {
-      // Feature is available
-      new FaceDetector(); // may throw if not supported fully
-      faceDetectorAvailable = true;
-    } catch(e) {
-      faceDetectorAvailable = false;
-    }
+  function load() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (Date.now() - parsed.dayStart > DAY_MS) return null; // expired
+    return parsed;
   }
 
-  // ---------- persistence ----------
-  function loadState() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      if (!parsed || !parsed.createdAt) return null;
-      // TTL check
-      if (Date.now() - parsed.createdAt > SESSION_TTL_MS) {
-        localStorage.removeItem(STORAGE_KEY);
-        return null;
-      }
-      return parsed;
-    } catch (e) {
-      console.warn('loadState error', e);
-      return null;
-    }
-  }
-
-  function saveState() {
-    state.createdAt = state.createdAt || Date.now();
+  function save() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }
 
-  function clearState() {
-    state = { createdAt: Date.now(), profiles: [], history: [] };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    // also clear vote flag so admin can test
-    localStorage.removeItem(VOTE_FLAG_KEY);
-    renderAll();
+  function init() {
+    const loaded = load();
+    if (loaded) state = loaded;
+    render();
   }
 
-  // ---------- helpers ----------
-  function uid() { return Math.random().toString(36).slice(2,10); }
-
-  function expected(rA, rB) {
-    return 1 / (1 + Math.pow(10, (rB - rA) / 400));
+  function pickMatch() {
+    if (state.profiles.length < 2) return;
+    const i = Math.floor(Math.random()*state.profiles.length);
+    let j = Math.floor(Math.random()*(state.profiles.length-1));
+    if (j>=i) j++;
+    state.match = { leftId: state.profiles[i].id, rightId: state.profiles[j].id };
+    save();
   }
 
-  function updateElo(winner, loser) {
-    const eW = expected(winner.elo, loser.elo);
-    const eL = expected(loser.elo, winner.elo);
-    winner.elo = Math.round(winner.elo + K * (1 - eW));
-    loser.elo = Math.round(loser.elo + K * (0 - eL));
-    winner.wins = (winner.wins || 0) + 1;
-    loser.losses = (loser.losses || 0) + 1;
-  }
-
-  function findProfile(id) {
-    return state.profiles.find(p => p.id === id);
-  }
-
-  // ---------- rendering ----------
-  function renderCards() {
-    countEl.textContent = state.profiles.length;
-    if (state.profiles.length < 2) {
-      leftCard.innerHTML = `<div class="small muted">Add at least 2 profiles</div>`;
+  function render() {
+    if (!state.match && state.profiles.length>=2) pickMatch();
+    if (!state.match) {
+      leftCard.innerHTML = '<div class="small muted">Add at least 2 profiles.</div>';
       rightCard.innerHTML = '';
+      leaderboardEl.innerHTML = '';
       return;
     }
-    // pick two random distinct
-    const i = Math.floor(Math.random()*state.profiles.length);
-    let j = Math.floor(Math.random()*(state.profiles.length - 1));
-    if (j >= i) j += 1;
-    const left = state.profiles[i];
-    const right = state.profiles[j];
-
-    leftCard.innerHTML = makeProfileNode(left, 'left');
-    rightCard.innerHTML = makeProfileNode(right, 'right');
-
-    // disable voting if user already voted within TTL
-    const votedMeta = JSON.parse(localStorage.getItem(VOTE_FLAG_KEY) || 'null');
-    const voted = votedMeta && (Date.now() - votedMeta.ts < SESSION_TTL_MS);
-
-    if (!voted) {
-      const btnL = leftCard.querySelector('button');
-      const btnR = rightCard.querySelector('button');
-      btnL?.addEventListener('click', () => doVote(left.id, right.id));
-      btnR?.addEventListener('click', () => doVote(right.id, left.id));
-    } else {
-      // disable buttons visually
-      leftCard.querySelector('button')?.setAttribute('disabled','');
-      rightCard.querySelector('button')?.setAttribute('disabled','');
-    }
+    const left = state.profiles.find(p=>p.id===state.match.leftId);
+    const right = state.profiles.find(p=>p.id===state.match.rightId);
+    leftCard.innerHTML = makeProfile(left,true);
+    rightCard.innerHTML = makeProfile(right,false);
+    renderLeaderboard();
+    bindVotes();
   }
 
-  function makeProfileNode(p, side) {
+  function makeProfile(p,isLeft) {
     return `
-      <div class="imgwrap"><img src="${p.imgDataUrl}" alt="${p.name||'Person'}"></div>
-      <div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-top:8px">
-        <div>
-          <div style="font-weight:700">${p.name||'—'}</div>
-          <div class="small muted">${p.wins||0}W • ${p.losses||0}L • ${p.votes||0} votes</div>
-        </div>
-        <div style="text-align:right"><div style="font-weight:700">${p.elo}</div><div class="small muted">rating</div></div>
-      </div>
-      <button class="btn" style="width:100%;margin-top:10px" data-id="${p.id}">Vote ${p.name||''}</button>
+      <div class="imgwrap"><img src="${p.img}" alt=""></div>
+      <div style="font-weight:700;margin-top:6px">${p.name||'—'}</div>
+      <button class="btn" data-id="${p.id}">Vote</button>
     `;
   }
 
-  function renderLeaderboard() {
-    const ranked = state.profiles.slice().sort((a,b)=>b.elo - a.elo).slice(0,5);
-    if (ranked.length === 0) {
-      leaderboardEl.innerHTML = '<div class="small muted">No profiles yet</div>';
+  function bindVotes() {
+    const voted = JSON.parse(localStorage.getItem(VOTE_KEY)||'null');
+    if (voted && Date.now()-voted.ts < DAY_MS) {
+      document.querySelectorAll('.btn').forEach(b=>b.setAttribute('disabled',''));
       return;
     }
-    leaderboardEl.innerHTML = ranked.map((p, i) => `
+    document.querySelectorAll('.btn').forEach(b=>{
+      b.addEventListener('click',()=>{
+        const id = b.dataset.id;
+        vote(id);
+      });
+    });
+  }
+
+  function vote(id) {
+    const voted = JSON.parse(localStorage.getItem(VOTE_KEY)||'null');
+    if (voted && Date.now()-voted.ts < DAY_MS) {
+      alert("You already voted today.");
+      return;
+    }
+    const prof = state.profiles.find(p=>p.id===id);
+    prof.votes = (prof.votes||0)+1;
+    save();
+    localStorage.setItem(VOTE_KEY, JSON.stringify({ts:Date.now()}));
+    render();
+    alert("Thanks! Your vote was recorded.");
+  }
+
+  function renderLeaderboard() {
+    const ranked = state.profiles.slice().sort((a,b)=>(b.votes||0)-(a.votes||0));
+    leaderboardEl.innerHTML = ranked.map(p=>`
       <div class="leader-item">
         <div class="leader-left">
-          <div style="font-weight:600;width:22px">${i+1}.</div>
-          <div class="thumb"><img src="${p.imgDataUrl}" alt=""></div>
-          <div style="margin-left:6px">${p.name||'—'}</div>
+          <div class="thumb"><img src="${p.img}"></div>
+          <div>${p.name||'—'}</div>
         </div>
-        <div style="font-weight:700">${p.elo}</div>
+        <div><b>${p.votes||0}</b> votes</div>
       </div>
     `).join('');
   }
 
-  function renderHistory() {
-    if (!state.history || state.history.length === 0) {
-      historyEl.textContent = 'No matches yet.';
-      return;
-    }
-    const list = state.history.slice().reverse().slice(0, MAX_HISTORY).map(entry => {
-      const left = findProfile(entry.leftId);
-      const right = findProfile(entry.rightId);
-      const winner = findProfile(entry.winnerId);
-      const t = new Date(entry.ts);
-      const when = t.toLocaleString();
-      return `<div style="margin-bottom:6px"><strong>${winner?.name||'—'}</strong> beat <em>${left?.id===winner?.id? right?.name : left?.name}</em> — <span class="small muted">${when}</span></div>`;
-    }).join('');
-    historyEl.innerHTML = list;
-  }
-
-  function renderAll() {
-    renderCards();
-    renderLeaderboard();
-    renderHistory();
-    // uploader availability
-    if (!faceDetectorAvailable) {
-      uploaderNotice.innerHTML = 'Face detection not available in your browser. Uploads disabled. (Use a Chromium-based browser that supports the FaceDetector API.)';
-      addBtn.setAttribute('disabled', '');
-      fileInput.setAttribute('disabled','');
-      nameInput.setAttribute('disabled','');
-    } else {
-      uploaderNotice.innerHTML = 'Face detection ready — images without a detectable face will be rejected.';
-      addBtn.removeAttribute('disabled');
-      fileInput.removeAttribute('disabled');
-      nameInput.removeAttribute('disabled');
-    }
-    countEl.textContent = state.profiles.length;
-  }
-
-  // ---------- vote flow ----------
-  function doVote(winnerId, loserId) {
-    // check vote flag TTL
-    const votedMeta = JSON.parse(localStorage.getItem(VOTE_FLAG_KEY) || 'null');
-    if (votedMeta && (Date.now() - votedMeta.ts < SESSION_TTL_MS)) {
-      alert('You already voted in this 24-hour session.');
-      renderAll();
-      return;
-    }
-
-    const winner = findProfile(winnerId);
-    const loser = findProfile(loserId);
-    if (!winner || !loser) return;
-
-    // increment votes for simple counter too
-    winner.votes = (winner.votes || 0) + 1;
-
-    // update Elo
-    updateElo(winner, loser);
-
-    // record history
-    state.history = state.history || [];
-    state.history.push({ leftId: winnerId === state.profiles.find(p=>p.id===winnerId)?.id ? winnerId : loserId, rightId: loserId, winnerId: winnerId, ts: Date.now() });
-    if (state.history.length > 200) state.history.shift();
-
-    // set vote flag (device)
-    localStorage.setItem(VOTE_FLAG_KEY, JSON.stringify({ ts: Date.now() }));
-
-    // persist
-    saveState();
-    // show next matchup immediately
-    renderAll();
-    // small feedback
-    alert('Thanks — your vote was recorded for ' + (winner.name || 'the selected person') + '.');
-  }
-
-  // ---------- add/upload flow with face detection ----------
-  async function handleAdd() {
-    if (!faceDetectorAvailable) {
-      alert('Face detection not available in this browser. Upload disabled.');
-      return;
-    }
-    const file = fileInput.files && fileInput.files[0];
-    if (!file) { alert('Choose one image file.'); return; }
-    // basic file size/type checks (optional)
-    if (!file.type.startsWith('image/')) { alert('Please upload an image file.'); return; }
-    if (file.size > 5 * 1024 * 1024) { // 5 MB limit
-      if (!confirm('Image is large (>5MB). Continue?')) return;
-    }
-
-    // convert to ImageBitmap for FaceDetector
-    try {
-      const imgBitmap = await createImageBitmap(file);
-      const detector = new FaceDetector(); // may throw if not available
-      const faces = await detector.detect(imgBitmap);
-      if (!faces || faces.length === 0) {
-        alert('No face detected in the image. Upload rejected.');
-        return;
-      }
-      // optionally: require exactly one face for "perfect face"
-      if (faces.length > 1) {
-        if (!confirm(`Detected ${faces.length} faces. Proceed to add image anyway? (If you want single-person images only, cancel and upload a different image.)`)) {
-          return;
-        }
-      }
-
-      // convert to DataURL for local storage
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result;
-        // add to profiles with initial elo/votes
-        const p = { id: uid(), name: nameInput.value.trim() || '', imgDataUrl: dataUrl, elo: 1200, wins:0, losses:0, votes:0 };
-        state.profiles.push(p);
-        saveState();
-        nameInput.value = '';
-        fileInput.value = '';
-        renderAll();
-        // auto-refresh matchmaking if now >=2
-        if (state.profiles.length >= 2) {
-          renderCards();
-        }
-      };
-      reader.readAsDataURL(file);
-    } catch (err) {
-      console.error('Face check error', err);
-      alert('Failed to validate face in image. Make sure your browser supports FaceDetector and try a different image.');
-    }
-  }
-
-  // ---------- session initialization ----------
-  function init() {
-    const loaded = loadState();
-    if (loaded) state = loaded;
-    else {
-      state = { createdAt: Date.now(), profiles: [], history: [] };
-      saveState();
-    }
-    renderAll();
-  }
-
-  // ---------- reset button (admin) ----------
-  resetBtn.addEventListener('click', () => {
-    if (!confirm('Reset session now? This will remove all profiles and votes for the session.')) return;
-    clearState();
-    alert('Session reset. New 24-hour session started.');
+  addBtn.addEventListener('click',()=>{
+    const file = fileInput.files[0];
+    if (!file) { alert("Select an image."); return; }
+    const reader = new FileReader();
+    reader.onload=()=>{
+      const img = reader.result;
+      const p = {id:Math.random().toString(36).slice(2,9),name:nameInput.value,img, votes:0};
+      state.profiles.push(p);
+      save();
+      nameInput.value='';
+      fileInput.value='';
+      render();
+    };
+    reader.readAsDataURL(file);
   });
 
-  // skip
-  skipBtn.addEventListener('click', () => renderCards());
-
-  // add handler
-  addBtn.addEventListener('click', () => handleAdd());
-
-  // auto-expire vote flag older than TTL (clean-up)
-  (function cleanupVoteFlag(){
-    try {
-      const meta = JSON.parse(localStorage.getItem(VOTE_FLAG_KEY) || 'null');
-      if (meta && (Date.now() - meta.ts > SESSION_TTL_MS)) localStorage.removeItem(VOTE_FLAG_KEY);
-    } catch(e) {}
-  })();
-
-  // run init
   init();
-
 })();
 </script>
 </body>
